@@ -1,130 +1,96 @@
 const telldus = require('telldus');
 const config = require('./telldus-config');
+const devices = config.devices;
 
 let cmdUpdates = {};
 let sensorUpdates = {};
+
+const parseEvent = (eventString) => eventString
+  .split(';')
+  .reduce((memo, datum) => {
+    const [key, value] = datum.split(':');
+    if (value !== undefined) {
+      memo[key] = value;
+    }
+    return memo;
+    }, {});
+
+const getDeviceIdentifier = (event) => event.class === 'command' ?
+  `${event.protocol}:${event.model}:${event.house}:${event.unit}` : 
+  `${event.protocol}:${event.model}:${event.id}`;
+
+const getSensorName = (event) => devices[getDeviceIdentifier(event)];
+
+const handleCommand = (event, sendValue) => {
+  console.log('Handling command');
+  const unitIdentifier = getDeviceIdentifier(event);
+
+  const sensorName = getSensorName(event);
+
+  const cacheId = `${sensorName}:${event.method}`;
+  const lastSent = cmdUpdates[cacheId];
+  const now = new Date().getTime();
+
+  const shouldSendNow = lastSent === undefined || now - lastSent > config.commandDebounce;
+  if (sensorName === undefined || !shouldSendNow) {
+    if (!shouldSendNow) {
+      console.log('Debounced command send. Sent', (now - lastSent)/1000, 'seconds ago');
+    }
+    return;
+  }
+
+  if (event.method === 'turnon') {
+    sendValue(sensorName, 1);
+    cmdUpdates[`${sensorName}:${event.method}`] = now;
+  } else if (event.method === 'turnoff') {
+    sendValue(sensorName, 0);
+    cmdUpdates[`${sensorName}:${event.method}`] = now;
+  }
+}
+
+const handleSensor = (event, sendValue) => {
+  const sendDebounced = (sensorName, value) => {
+    const lastSent = sensorUpdates[sensorName];
+    const now = new Date().getTime();
+    const shouldSendNow = lastSent === undefined || now - lastSent > config.sendInterval;
+    if (shouldSendNow) {
+      sensorUpdates[sensorName] = now;
+      sendValue(sensorName, value);
+    } else {
+      console.log('Ignored sensor update', sensorName, value, (now - lastSent)/1000, 'seconds from last update');
+    }
+  }
+
+  const sensorType = event.model;
+  const sensorIdentifier = getDeviceIdentifier(event);
+  if (sensorType === 'temperature') {
+    const measurementIdentifier = `${sensorIdentifier}:temp`;
+    sendDebounced(devices[measurementIdentifier], event.temp);
+//      console.log(devices[measurementIdentifier], event.temp);
+  } else if (sensorType === 'temperaturehumidity') {
+    const tempIdentifier = `${sensorIdentifier}:temp`;
+    // console.log(devices[tempIdentifier], event.temp);
+    sendDebounced(devices[tempIdentifier], event.temp);
+    const humidityIdentifier = `${sensorIdentifier}:humidity`;
+    // console.log(devices[humidityIdentifier], event.humidity);
+    sendDebounced(devices[humidityIdentifier], event.humidity);
+  } else {
+    console.log('Unknown sensor type', sensorType);
+  }
+}
 
 module.exports = sendValue => {
   if (!sendValue) {
     throw new Error('Callback missing');
   }
 
-  let prevUpdate = {};
-
   const rawListener = telldus.addRawDeviceEventListener(function(controllerId, data) {
-  //  console.log('Raw device event: ', controllerId, data);
-    event = data.split(';').reduce((memo, datum) => {
-      const [key, value] = datum.split(':');
-      if (value !== undefined) {
-        memo[key] = value;
-      }
-      return memo;
-    }, {});
-
+    const event = parseEvent(data);
     const eventType = event.class;
-    const protocolIdentifier = `${event.protocol}:${event.model}`;
-
-  if (eventType === 'command') {
-      const unitIdentifier = `${event.house}:${event.unit}`
-
-      const sensorName = filters[`${protocolIdentifier}:${unitIdentifier}`];
-      const lastSent = cmdUpdates[`${protocolIdentifier}:${unitIdentifier}:event.method`]
-      const now = new Date().getTime();
-
-      const shouldSendNow = lastSent === undefined || now - lastSent > 1000;
-      if (sensorName === undefined || !shouldSendNow) {
-        return;
-      }
-
-      if (event.method === 'turnon') {
-  //      console.log(sensorName, 'auki');
-        sendValue(sensorName, 1);
-        cmdUpdates[`${protocolIdentifier}:${unitIdentifier}:event.method`] = now;
-      } else if (event.method === 'turnoff') {
-  //      console.log(sensorName, 'kiinni');
-        sendValue(sensorName, 0);
-        cmdUpdates[`${protocolIdentifier}:${unitIdentifier}:event.method`] = now;
-        //console.log(protocolIdentifier, unitIdentifier, event.method);
-      }
+    if (eventType === 'command') {
+      handleCommand(event, sendValue);
     } else if (eventType === 'sensor') {
-      const sensorType = event.model;
-      const sensorIdentifier = `${protocolIdentifier}:${event.id}`;
-      if (sensorType === 'temperature') {
-        const measurementIdentifier = `${sensorIdentifier}:temp`;
-        sendValue(filters[measurementIdentifier], event.temp);
-  //      console.log(filters[measurementIdentifier], event.temp);
-      } else if (sensorType === 'temperaturehumidity') {
-        const tempIdentifier = `${sensorIdentifier}:temp`;
-        // console.log(filters[tempIdentifier], event.temp);
-        sendValue(filters[tempIdentifier], event.temp);
-        const humidityIdentifier = `${sensorIdentifier}:humidity`;
-        // console.log(filters[humidityIdentifier], event.humidity);
-        sendValue(filters[humidityIdentifier], event.humidity);
-      } else {
-        console.log('Unknown sensor type', sensorType);
-      }
+      handleSensor(event, sendValue);
     }
   });
-
-
-  prevUpdate[tagId] = 0;
-  const now = new Date().getTime();
-  if (now - prevUpdate[tagId] > ruuviInterval) {
-      prevUpdate[tagId] = now;
-      // TODO: map ruuvi ID to proper name
-      selectedMeasurements.forEach(measurement => 
-        sendValue(`ruuvi/${measurement}`, data[measurement]));
-  }
-  
 }
-
-/*
-Raw device event:  1 class:command;protocol:everflourish;model:selflearning;house:863;unit:4;method:turnon;
-{ class: 'command',
-  protocol: 'everflourish',
-  model: 'selflearning',
-  house: '863',
-  unit: '4',
-  method: 'turnon' }
-
-Raw device event:  1 class:sensor;protocol:fineoffset;id:135;model:temperaturehumidity;humidity:65;temp:26.1;
-{ class: 'sensor',
-  protocol: 'fineoffset',
-  id: '135',
-  model: 'temperaturehumidity',
-  humidity: '65',
-  temp: '26.1' }
-
-Raw device event:  1 class:sensor;protocol:fineoffset;id:136;model:temperature;temp:30.0;
-{ class: 'sensor',
-  protocol: 'fineoffset',
-  id: '136',
-  model: 'temperature',
-  temp: '30.0' }
-
-Raw device event:  1 class:sensor;protocol:fineoffset;id:151;model:temperaturehumidity;humidity:77;temp:24.6;
-New humidity reading 151 77
-New temperature reading 151 24.6
-
-
-
-
-Raw device event:  1 class:command;protocol:arctech;model:selflearning;house:43745278;unit:16;group:0;method:turnon;
-Status change
-etuovi auki
-
-
-
-Raw device event:  1 class:command;protocol:everflourish;model:selflearning;house:14335;unit:4;method:turnon;
-Status change
-undefined 'auki'
-
-
-
-Raw device event:  1 class:command;protocol:arctech;model:selflearning;house:43745278;unit:16;group:0;method:turnoff;
-Status change
-etuovi auki
-
-
-
-*/
